@@ -1,0 +1,182 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false; // Global catch-all deny
+    }
+
+    // Primitive Helpers
+    function isSignedIn() { return request.auth != null; }
+    function isVerified() { return isSignedIn(); }
+    function isAdmin() { return isVerified() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'ADMIN'; }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Entity Validations
+    function isValidUser(data) {
+      return data.keys().hasAll(['email', 'role'])
+        && data.keys().hasOnly(['email', 'name', 'role', 'permissions', 'createdAt', 'updatedAt', 'id', 'photoURL', 'avatar', 'provider'])
+        && (!('permissions' in data) || data.permissions is map)
+        && data.email is string && data.email.size() > 0 && data.email.size() <= 256
+        && (!('name' in data) || data.name == null || (data.name is string && data.name.size() <= 256))
+        && data.role in ['ADMIN', 'ACCOUNTANT', 'CSKH', 'WAREHOUSE', 'PENDING'];
+    }
+
+    function isValidProduct(data) {
+      return data.keys().hasOnly(['id', 'barcode', 'name', 'brand', 'price', 'cost', 'stock', 'minStock', 'maxStock', 'weight', 'sellDirectly', 'bonusPoints', 'description', 'image', 'createdAt', 'updatedAt'])
+        && data.id is string && data.id.size() > 0 && data.id.size() <= 128
+        && (!('barcode' in data) || data.barcode == null || (data.barcode is string && data.barcode.size() <= 128))
+        && data.name is string && data.name.size() > 0 && data.name.size() <= 500
+        && (!('brand' in data) || data.brand == null || (data.brand is string && data.brand.size() <= 100))
+        && data.price is number && data.price >= 0
+        && data.cost is number && data.cost >= 0
+        && data.stock is number
+        && (!('minStock' in data) || data.minStock == null || (data.minStock is number))
+        && (!('maxStock' in data) || data.maxStock == null || (data.maxStock is number))
+        && (!('weight' in data) || data.weight == null || (data.weight is number))
+        && (!('sellDirectly' in data) || data.sellDirectly == null || (data.sellDirectly is bool))
+        && (!('bonusPoints' in data) || data.bonusPoints == null || (data.bonusPoints is bool))
+        && (!('description' in data) || data.description == null || (data.description is string && data.description.size() <= 2000))
+        && (!('image' in data) || data.image == null || (data.image is string && data.image.size() <= 1048576));
+    }
+
+    function isValidPartner(data) {
+      return data.keys().hasOnly(['id', 'type', 'name', 'phone', 'address', 'cccd', 'mst', 'totalReceivable', 'totalPayable', 'createdAt', 'updatedAt'])
+        && data.id is string && data.id.size() > 0 && data.id.size() <= 128
+        && data.type in ['CUSTOMER', 'SUPPLIER']
+        && data.name is string && data.name.size() > 0 && data.name.size() <= 256
+        && (!('phone' in data) || data.phone == null || (data.phone is string && data.phone.size() <= 32))
+        && (!('address' in data) || data.address == null || (data.address is string && data.address.size() <= 500))
+        && (!('cccd' in data) || data.cccd == null || (data.cccd is string && data.cccd.size() <= 32))
+        && (!('mst' in data) || data.mst == null || (data.mst is string && data.mst.size() <= 32))
+        && data.totalReceivable is number
+        && data.totalPayable is number;
+    }
+
+    function isValidTransaction(data) {
+      return data.keys().hasOnly(['id', 'type', 'date', 'totalValue', 'costValue', 'note', 'partnerId', 'partnerName', 'userId', 'items', 'createdAt', 'updatedAt', 'discount', 'otherFees', 'amountPaid'])
+        && data.id is string && data.id.size() > 0 && data.id.size() <= 128
+        && data.type in ['IMPORT', 'EXPORT']
+        && data.date is string && data.date.size() > 0 && data.date.size() <= 50
+        && data.totalValue is number && data.totalValue >= 0
+        && (!('costValue' in data) || data.costValue == null || data.costValue is number)
+        && (!('note' in data) || data.note == null || (data.note is string && data.note.size() <= 1000))
+        && (!('partnerId' in data) || data.partnerId == null || (data.partnerId is string && data.partnerId.size() <= 128))
+        && (!('partnerName' in data) || data.partnerName == null || (data.partnerName is string && data.partnerName.size() <= 256))
+        && (!('discount' in data) || data.discount == null || data.discount is number)
+        && (!('otherFees' in data) || data.otherFees == null || data.otherFees is number)
+        && (!('amountPaid' in data) || data.amountPaid == null || data.amountPaid is number)
+        && (!('items' in data) || data.items == null || (data.items is list && data.items.size() <= 500 && (data.items.size() == 0 || (data.items[0] is map && data.items[0].keys().hasAll(['productId', 'name', 'quantity', 'price', 'cost'])))));
+    }
+
+    function isValidActivityLog(data) {
+      return data.keys().hasOnly(['id', 'userId', 'userName', 'action', 'module', 'details', 'createdAt'])
+        && data.id is string && data.id.size() > 0 && data.id.size() <= 128
+        && data.userId is string && data.userId == request.auth.uid
+        && data.userName is string && data.userName.size() <= 256
+        && data.action is string && data.action.size() <= 100
+        && data.module is string && data.module.size() <= 100
+        && data.details is string && data.details.size() <= 2000;
+    }
+
+    // Paths
+    match /products/{productId} {
+      allow get, list: if isVerified();
+      allow create: if isVerified() 
+        && isValidId(productId) 
+        && isValidProduct(incoming()) 
+        && (incoming().createdAt == request.time || incoming().createdAt is number || isAdmin());
+      allow update: if isVerified() 
+        && isValidId(productId) 
+        && isValidProduct(incoming()) 
+        && (
+          incoming().diff(existing()).affectedKeys().hasOnly(['barcode', 'name', 'brand', 'price', 'cost', 'stock', 'minStock', 'maxStock', 'weight', 'sellDirectly', 'bonusPoints', 'description', 'image', 'updatedAt'])
+          || isAdmin()
+        )
+        && (incoming().updatedAt == request.time || incoming().updatedAt is number || isAdmin())
+        && (incoming().createdAt == existing().createdAt || isAdmin());
+      allow delete: if isVerified() && isValidId(productId);
+    }
+
+    match /partners/{partnerId} {
+      allow get, list: if isVerified();
+      allow create: if isVerified() 
+        && isValidId(partnerId) 
+        && isValidPartner(incoming()) 
+        && incoming().createdAt == request.time;
+      allow update: if isVerified() 
+        && isValidId(partnerId) 
+        && isValidPartner(incoming()) 
+        && (
+          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'phone', 'address', 'cccd', 'mst', 'totalReceivable', 'totalPayable', 'updatedAt'])
+          || isAdmin()
+        )
+        && incoming().updatedAt == request.time
+        && incoming().createdAt == existing().createdAt;
+      allow delete: if isVerified() && isValidId(partnerId);
+    }
+
+    match /transactions/{transactionId} {
+      allow get, list: if isVerified();
+      allow create: if isVerified() 
+        && isValidId(transactionId) 
+        && isValidTransaction(incoming()) 
+        && incoming().userId == request.auth.uid
+        && incoming().createdAt == request.time;
+      allow update: if isVerified() 
+        && isValidId(transactionId) 
+        && isValidTransaction(incoming())
+        && (
+          incoming().diff(existing()).affectedKeys().hasOnly(['type', 'date', 'totalValue', 'costValue', 'note', 'partnerId', 'partnerName', 'discount', 'otherFees', 'amountPaid', 'items', 'updatedAt'])
+          || isAdmin()
+        )
+        && incoming().userId == existing().userId
+        && incoming().createdAt == existing().createdAt;
+      allow delete: if isVerified() && isValidId(transactionId);
+    }
+
+    match /users/{userId} {
+      allow get: if isVerified() && (request.auth.uid == userId || isAdmin() || (
+        'permissions' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data &&
+        'users' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data.permissions &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.permissions.users.view == true
+      ));
+      allow list: if isVerified() && (isAdmin() || (
+        'permissions' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data &&
+        'users' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data.permissions &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.permissions.users.view == true
+      ));
+      allow create: if isVerified() && (request.auth.uid == userId || isAdmin()) && isValidUser(incoming()) && (incoming().role != 'ADMIN' || request.auth.token.email in ['anhovan.mmo@gmail.com', 'anhovan.cso@gmail.com']) && incoming().createdAt == request.time;
+      allow update: if isVerified() && (
+        (request.auth.uid == userId && incoming().diff(existing()).affectedKeys().hasOnly(['name', 'updatedAt', 'id', 'photoURL', 'avatar'])) ||
+        (isAdmin()) 
+      );
+      allow delete: if isAdmin();
+    }
+    match /activity_logs/{logId} {
+      allow read: if isVerified() && (isAdmin() || (
+        'permissions' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data &&
+        'logs' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data.permissions &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.permissions.logs.view == true
+      ));
+      allow create: if isVerified() && isValidId(logId) && isValidActivityLog(incoming()) && incoming().createdAt == request.time;
+      allow update, delete: if false; // immutable
+    }
+    match /settings/{settingId} {
+      allow get: if isVerified();
+      allow list: if isVerified();
+      allow create, update, delete: if isVerified() && (isAdmin() || (
+        'permissions' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data &&
+        'settings' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data.permissions &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.permissions.settings.edit == true
+      ) || (
+        'permissions' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data &&
+        'products' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data.permissions &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.permissions.products.create == true
+      ));
+    }
+  }
+}
